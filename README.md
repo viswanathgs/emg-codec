@@ -119,13 +119,15 @@ emg2qwerty is CC-BY-NC-4.0 licensed, as found in the LICENSE file.
 ## Citing emg2qwerty
 
 ```
-@misc{sivakumar2024emg2qwertylargedatasetbaselines,
-      title={emg2qwerty: A Large Dataset with Baselines for Touch Typing using Surface Electromyography},
-      author={Viswanath Sivakumar and Jeffrey Seely and Alan Du and Sean R Bittner and Adam Berenzweig and Anuoluwapo Bolarinwa and Alexandre Gramfort and Michael I Mandel},
-      year={2024},
-      eprint={2410.20081},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2410.20081},
+@inproceedings{emg2qwerty_neurips2024,
+ author = {Sivakumar, Viswanath and Seely, Jeffrey and Du, Alan and Bittner, Sean R and Berenzweig, Adam and Bolarinwa, Anuoluwapo and Gramfort, Alexandre and Mandel, Michael I},
+ booktitle = {Advances in Neural Information Processing Systems},
+ editor = {A. Globerson and L. Mackey and D. Belgrave and A. Fan and U. Paquet and J. Tomczak and C. Zhang},
+ pages = {91373--91389},
+ publisher = {Curran Associates, Inc.},
+ title = {emg2qwerty: A Large Dataset with Baselines for Touch Typing using Surface Electromyography},
+ url = {https://proceedings.neurips.cc/paper_files/paper/2024/file/a64d53074d011e49af1dfc72c332fe4b-Paper-Datasets_and_Benchmarks_Track.pdf},
+ volume = {37},
+ year = {2024}
 }
 ```
