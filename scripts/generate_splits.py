@@ -246,6 +246,14 @@ def main(
             test=personalized_test[personalized_test["user"] == user],
         )
 
+    # Dump a single split combining all the held-out users for personalization
+    dump_split(
+        user="personalized_combined",
+        train=personalized_train,
+        val=personalized_val,
+        test=personalized_test,
+    )
+
 
 if __name__ == "__main__":
     main()
