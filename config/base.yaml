@@ -5,6 +5,7 @@ defaults:
   - optimizer: adamw
   - lr_scheduler: linear_warmup_cosine_annealing
   - decoder: ctc_greedy
+  - vector_quantizer: none
   - cluster: local
   - _self_
 

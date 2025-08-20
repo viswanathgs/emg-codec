@@ -1,0 +1,5 @@
+# @package _global_
+vector_quantizer:
+  _target_: emg2qwerty.vector_quantizer.VectorQuantizer
+  parent_block_id: 1
+  codebook_size: 256

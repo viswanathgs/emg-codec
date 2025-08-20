@@ -150,6 +150,7 @@ class TDSConvCTCModule(pl.LightningModule):
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
         decoder: DictConfig,
+        vector_quantizer: DictConfig | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -173,6 +174,7 @@ class TDSConvCTCModule(pl.LightningModule):
                 num_features=num_features,
                 block_channels=block_channels,
                 kernel_width=kernel_width,
+                vector_quantizer=vector_quantizer,
             ),
             # (T, N, num_classes)
             nn.Linear(num_features, charset().num_classes),

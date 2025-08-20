@@ -60,6 +60,7 @@ def main(config: DictConfig):
         optimizer=config.optimizer,
         lr_scheduler=config.lr_scheduler,
         decoder=config.decoder,
+        vector_quantizer=config.vector_quantizer,
         _recursive_=False,
     )
     if config.checkpoint is not None:
