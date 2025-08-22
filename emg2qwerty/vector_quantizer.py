@@ -46,6 +46,7 @@ class VectorQuantizer(BaseVectorQuantizer):
         kmeans_rtol: float = 1e-6,
         ema_update: bool = True,
         ema_decay: float = 0.9,
+        ema_expire_code_threshold: float = 2.0,
     ) -> None:
         super().__init__(parent_block_id=parent_block_id, embedding_dim=embedding_dim)
 
@@ -55,6 +56,7 @@ class VectorQuantizer(BaseVectorQuantizer):
         self.kmeans_rtol = kmeans_rtol
         self.ema_update = ema_update
         self.ema_decay = ema_decay
+        self.ema_expire_code_threshold = ema_expire_code_threshold
 
         # Init codebook entries randomly. Will be re-initialized
         # using k-means on the first training batch if kmeans_init is True.
@@ -74,7 +76,7 @@ class VectorQuantizer(BaseVectorQuantizer):
                 torch.zeros(codebook_size, embedding_dim, dtype=torch.float32),
             )
             self.register_buffer(
-                "ema_cluster_count",
+                "ema_cluster_size",
                 torch.zeros(codebook_size, dtype=torch.float32),
             )
 
@@ -100,8 +102,9 @@ class VectorQuantizer(BaseVectorQuantizer):
         # codebook lookup operation.
         quantized = (quantized - inputs).detach() + inputs
 
-        if self.training:
+        if self.training and self.ema_update:
             self._update_codebook(inputs, assignment)
+            self._expire_codes(inputs)
 
         return quantized
 
@@ -141,9 +144,6 @@ class VectorQuantizer(BaseVectorQuantizer):
 
     @torch.jit.ignore
     def _update_codebook(self, inputs: torch.Tensor, assignment: torch.Tensor) -> None:
-        if not self.ema_update:
-            return
-
         # inputs: TNC, assignment: TN
         assert inputs.ndim == assignment.ndim + 1
         assert inputs.shape[-1] == self.embedding_dim
@@ -155,7 +155,7 @@ class VectorQuantizer(BaseVectorQuantizer):
                 for cluster_id in range(self.codebook_size)
             ]
         )
-        cluster_count = torch.tensor(
+        cluster_size = torch.tensor(
             [
                 (assignment == cluster_id).sum()
                 for cluster_id in range(self.codebook_size)
@@ -166,7 +166,7 @@ class VectorQuantizer(BaseVectorQuantizer):
 
         # All-reduce cluster sums and counts across all ranks
         utils.all_reduce_tensor(cluster_sum)
-        utils.all_reduce_tensor(cluster_count)
+        utils.all_reduce_tensor(cluster_size)
 
         # Initialize EMA buffers using the first training batch
         decay = self.ema_decay
@@ -176,16 +176,62 @@ class VectorQuantizer(BaseVectorQuantizer):
 
         # Update EMA cluster sums and counts:
         # ema_cluster_sum = decay * ema_cluster_sum + (1 - decay) * cluster_sum
-        # ema_cluster_count = decay * ema_cluster_count + (1 - decay) * cluster_count
+        # ema_cluster_size = decay * ema_cluster_size + (1 - decay) * cluster_size
         self.ema_cluster_sum.mul_(decay).add_(cluster_sum, alpha=1 - decay)
-        self.ema_cluster_count.mul_(decay).add_(cluster_count, alpha=1 - decay)
+        self.ema_cluster_size.mul_(decay).add_(cluster_size, alpha=1 - decay)
 
         # Update codebook entries using EMA
         new_centroids = self.ema_cluster_sum / (
-            self.ema_cluster_count.unsqueeze(1) + EPS
+            self.ema_cluster_size.unsqueeze(1) + EPS
         )
-        # TODO: add codebook expiration support
         self.codebook.weight.copy_(new_centroids)
+
+    @torch.jit.ignore
+    def _expire_codes(self, inputs: torch.Tensor) -> None:
+        # Find indices of codes where the EMA cluster size falls below threshold
+        expired_idx = torch.where(
+            self.ema_cluster_size < self.ema_expire_code_threshold
+        )[0]
+
+        n_expired = len(expired_idx)
+        if len(expired_idx) == 0:
+            # All codes are sufficiently active, nothing to expire
+            return
+
+        log.info(
+            f"Found {n_expired}/{self.codebook_size} expired codes; "
+            f"replacing them with random samples from current batch in rank 0."
+        )
+
+        # Replace expired codes with samples randomly selected from the current
+        # training batch. Perform this just on rank 0 and then broadcast to keep the
+        # codebook in sync across ranks.
+        if utils.get_rank() == 0:
+            # Flatten input batch to select replacements from
+            samples = inputs.view(-1, self.embedding_dim)
+            n_samples = len(samples)
+            if n_samples < n_expired:
+                log.warning(
+                    "Not enough samples in rank 0 training batch "
+                    "to replace expired codes."
+                )
+                expired_idx = expired_idx[:n_samples]
+                n_expired = n_samples
+
+            # Sample replacements and update expired codes in the codebook
+            replacement_idx = torch.randperm(n_samples)[:n_expired]
+            self.codebook.weight[expired_idx] = samples[replacement_idx]
+
+            # If EMA buffers are present, update them for the expired codes
+            if self.ema_update:
+                self.ema_cluster_sum[expired_idx] = samples[replacement_idx]
+                self.ema_cluster_size[expired_idx] = 1.0
+
+        # Broadcast the updated codebook to all ranks
+        utils.broadcast_tensor(self.codebook.weight, src_rank=0)
+        if self.ema_update:
+            utils.broadcast_tensor(self.ema_cluster_sum, src_rank=0)
+            utils.broadcast_tensor(self.ema_cluster_size, src_rank=0)
 
     @torch.jit.ignore
     def _kmeans(

@@ -8,3 +8,4 @@ vector_quantizer:
   kmeans_rtol: 1e-6
   ema_update: True
   ema_decay: 0.9
+  ema_expire_code_threshold: 2.0
