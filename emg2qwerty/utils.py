@@ -54,6 +54,17 @@ def get_rank() -> int:
     return 0
 
 
-def broadcast_tensor(tensor: torch.Tensor, src_rank: int) -> None:
+def broadcast_tensor(
+    tensor: torch.Tensor,
+    src_rank: int,
+) -> None:
     if dist.is_available() and dist.is_initialized():
-        dist.broadcast(tensor, src_rank)
+        dist.broadcast(tensor, src=src_rank)
+
+
+def all_reduce_tensor(
+    tensor: torch.Tensor,
+    op: dist.ReduceOp = dist.ReduceOp.SUM,
+) -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(tensor, op=op)
