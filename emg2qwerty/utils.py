@@ -8,6 +8,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import torch
+
+import torch.distributed as dist
+
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
@@ -42,3 +46,14 @@ def cpus_per_task(gpus_per_node: int, tasks_per_node: int, num_workers: int) -> 
         return num_workers + 1
     else:
         return (num_workers + 1) * gpus_per_task
+
+
+def get_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return int(dist.get_rank())
+    return 0
+
+
+def broadcast_tensor(tensor: torch.Tensor, src_rank: int) -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.broadcast(tensor, src_rank)
