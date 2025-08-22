@@ -48,7 +48,10 @@ class VectorQuantizer(BaseVectorQuantizer):
         ema_decay: float = 0.9,
         ema_expire_code_threshold: float = 2.0,
     ) -> None:
-        super().__init__(parent_block_id=parent_block_id, embedding_dim=embedding_dim)
+        super().__init__(
+            parent_block_id=parent_block_id,
+            embedding_dim=embedding_dim,
+        )
 
         self.codebook_size = codebook_size
         self.kmeans_init = kmeans_init
@@ -280,3 +283,50 @@ class VectorQuantizer(BaseVectorQuantizer):
         )
 
         return centroids
+
+
+class ResidualVectorQuantizer(BaseVectorQuantizer):
+    def __init__(
+        self,
+        parent_block_id: int,
+        embedding_dim: int,
+        n_vq: int,
+        codebook_size: int,
+        kmeans_init: bool = True,
+        kmeans_max_iters: int = 300,
+        kmeans_rtol: float = 1e-6,
+        ema_update: bool = True,
+        ema_decay: float = 0.9,
+        ema_expire_code_threshold: float = 2.0,
+    ) -> None:
+        super().__init__(
+            parent_block_id=parent_block_id,
+            embedding_dim=embedding_dim,
+        )
+
+        self.vq = nn.ModuleList(
+            VectorQuantizer(
+                parent_block_id=parent_block_id,
+                embedding_dim=embedding_dim,
+                codebook_size=codebook_size,
+                kmeans_init=kmeans_init,
+                kmeans_max_iters=kmeans_max_iters,
+                kmeans_rtol=kmeans_rtol,
+                ema_update=ema_update,
+                ema_decay=ema_decay,
+                ema_expire_code_threshold=ema_expire_code_threshold,
+            )
+            for _ in range(n_vq)
+        )
+        log.info(f"Instantiated ResidualVectorQuantizer with {n_vq} levels.")
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        quantized = torch.zeros_like(inputs)
+        for vq in self.vq:
+            # Quantize the residual
+            quantized += vq(inputs - quantized)
+        return quantized
+
+    @torch.jit.export
+    def nbits_compressed(self) -> int:
+        return sum([vq.nbits_compressed() for vq in self.vq])
