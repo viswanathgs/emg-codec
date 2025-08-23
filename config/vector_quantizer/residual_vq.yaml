@@ -4,7 +4,7 @@ vector_quantizer:
   parent_block_id: 1
   n_vq: 4
   codebook_size: 8
-  kmeans_init: True
+  codebook_init: kmeans
   kmeans_max_iters: 300
   kmeans_rtol: 1e-6
   ema_update: True

@@ -2,6 +2,7 @@ import abc
 
 import logging
 import math
+from typing import Literal
 
 import torch
 from torch import nn
@@ -41,7 +42,7 @@ class VectorQuantizer(BaseVectorQuantizer):
         parent_block_id: int,
         embedding_dim: int,
         codebook_size: int,
-        kmeans_init: bool = True,
+        codebook_init: Literal["random", "kmeans", "kmeans++"] = "kmeans",
         kmeans_max_iters: int = 300,
         kmeans_rtol: float = 1e-6,
         ema_update: bool = True,
@@ -53,16 +54,18 @@ class VectorQuantizer(BaseVectorQuantizer):
             embedding_dim=embedding_dim,
         )
 
+        assert codebook_init in {"random", "kmeans", "kmeans++"}
+
         self.codebook_size = codebook_size
-        self.kmeans_init = kmeans_init
+        self.codebook_init = codebook_init
         self.kmeans_max_iters = kmeans_max_iters
         self.kmeans_rtol = kmeans_rtol
         self.ema_update = ema_update
         self.ema_decay = ema_decay
         self.ema_expire_code_threshold = ema_expire_code_threshold
 
-        # Init codebook entries randomly. Will be re-initialized
-        # using k-means on the first training batch if kmeans_init is True.
+        # Init codebook entries randomly. Will be re-initialized using k-means
+        # on the first training batch depending on the value of `codebook_init`.
         self.codebook = nn.Embedding(codebook_size, embedding_dim)
 
         # Whether the codebook has been initialized
@@ -92,7 +95,7 @@ class VectorQuantizer(BaseVectorQuantizer):
         assert inputs.shape[2] == self.embedding_dim
 
         # Lazy-init codebook entries based on the first training batch.
-        # No-op if kmeans_init is False.
+        # No-op if `codebook_init="random"`.
         if self.training and not self.codebook_initialized:
             self._init_codebook(inputs)
             self.codebook_initialized.fill_(True)
@@ -116,9 +119,10 @@ class VectorQuantizer(BaseVectorQuantizer):
         return math.ceil(math.log2(self.codebook_size))
 
     @torch.jit.ignore
+    @torch.no_grad()
     def _init_codebook(self, inputs: torch.Tensor) -> None:
-        if not self.kmeans_init:
-            # Fallback to default random init for codebook entries
+        if self.codebook_init == "random":
+            # Nothing to do, codebook already randomly initialized
             return
 
         # Run kmeans only on rank 0
@@ -142,10 +146,10 @@ class VectorQuantizer(BaseVectorQuantizer):
         utils.broadcast_tensor(centroids, src_rank=0)
 
         # Init codebook entries with cluster centroids
-        with torch.no_grad():
-            self.codebook.weight.copy_(centroids)
+        self.codebook.weight.copy_(centroids)
 
     @torch.jit.ignore
+    @torch.no_grad()
     def _update_codebook(self, inputs: torch.Tensor, assignment: torch.Tensor) -> None:
         # inputs: TNC, assignment: TN
         assert inputs.ndim == assignment.ndim + 1
@@ -190,6 +194,7 @@ class VectorQuantizer(BaseVectorQuantizer):
         self.codebook.weight.copy_(new_centroids)
 
     @torch.jit.ignore
+    @torch.no_grad()
     def _expire_codes(self, inputs: torch.Tensor) -> None:
         # Find indices of codes where the EMA cluster size falls below threshold
         expired_idx = torch.where(
@@ -237,6 +242,7 @@ class VectorQuantizer(BaseVectorQuantizer):
             utils.broadcast_tensor(self.ema_cluster_size, src_rank=0)
 
     @torch.jit.ignore
+    @torch.no_grad()
     def _kmeans(
         self,
         samples: torch.Tensor,
@@ -249,12 +255,30 @@ class VectorQuantizer(BaseVectorQuantizer):
         n_samples = len(samples)
         assert n_samples >= n_clusters
 
-        # Random centroid init.
-        # TODO: switch to k-means++ init.
-        centroids_idx = torch.randperm(n_samples)[:n_clusters]
+        # Initialize cluster centroids
+        assert self.codebook_init in {"kmeans", "kmeans++"}
+        if self.codebook_init == "kmeans":  # Random centroid init
+            centroids_idx = torch.randperm(n_samples)[:n_clusters]
+        else:  # kmeans++ init
+            # Pick the first centroid at random
+            centroids_idx = torch.randint(
+                low=0,
+                high=n_samples,
+                size=(1,),
+                device=samples.device,
+            )
+            # Sample subsequent centroids with probability proportional to
+            # squared distance to the closest centroid chosen so far.
+            while len(centroids_idx) < n_clusters:
+                l2_dist = torch.cdist(samples, samples[centroids_idx], p=2.0)
+                nearest_dist = l2_dist.min(dim=-1).values.pow(2.0)
+                probs = nearest_dist / nearest_dist.sum()
+                centroids_idx = torch.cat(
+                    [centroids_idx, torch.multinomial(probs, num_samples=1)]
+                )
         centroids = samples[centroids_idx]
 
-        # EM-style alternative minimization
+        # EM-style iterations
         prev_error = None
         for n_iter in range(max_iters):
             # Computer cluster assignments
@@ -269,8 +293,8 @@ class VectorQuantizer(BaseVectorQuantizer):
                 ]
             )
 
-            # K-means loss: sum of squared L2 distances between
-            # each point and its assigned cluster.
+            # K-means objective: within-cluster sum of squares (sum of
+            # squared L2 distances between each point and its assigned cluster).
             error = l2_dist.min(dim=-1).values.pow(2.0).sum()
             if prev_error is not None:
                 if (prev_error - error).abs() / prev_error < rtol:
@@ -292,7 +316,7 @@ class ResidualVectorQuantizer(BaseVectorQuantizer):
         embedding_dim: int,
         n_vq: int,
         codebook_size: int,
-        kmeans_init: bool = True,
+        codebook_init: Literal["random", "kmeans", "kmeans++"] = "kmeans",
         kmeans_max_iters: int = 300,
         kmeans_rtol: float = 1e-6,
         ema_update: bool = True,
@@ -309,7 +333,7 @@ class ResidualVectorQuantizer(BaseVectorQuantizer):
                 parent_block_id=parent_block_id,
                 embedding_dim=embedding_dim,
                 codebook_size=codebook_size,
-                kmeans_init=kmeans_init,
+                codebook_init=codebook_init,
                 kmeans_max_iters=kmeans_max_iters,
                 kmeans_rtol=kmeans_rtol,
                 ema_update=ema_update,
