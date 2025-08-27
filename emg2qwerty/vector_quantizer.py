@@ -89,6 +89,11 @@ class VectorQuantizer(BaseVectorQuantizer):
             # Whether the EMA buffers have been initialized
             self.register_buffer("ema_initialized", torch.tensor(False))
 
+        log.info(
+            f"Instantiated VectorQuantizer with a codebook of size {codebook_size} "
+            f"({self.nbits_compressed()} bits per frame)."
+        )
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # inputs: TNC
         assert inputs.ndim == 3
@@ -342,7 +347,11 @@ class ResidualVectorQuantizer(BaseVectorQuantizer):
             )
             for _ in range(n_vq)
         )
-        log.info(f"Instantiated ResidualVectorQuantizer with {n_vq} levels.")
+
+        log.info(
+            f"Instantiated ResidualVectorQuantizer with {n_vq} codebooks of size "
+            f"{codebook_size} each ({self.nbits_compressed()} bits per frame)."
+        )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         quantized = torch.zeros_like(inputs)
