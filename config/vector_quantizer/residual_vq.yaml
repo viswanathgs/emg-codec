@@ -1,9 +1,9 @@
 # @package _global_
 vector_quantizer:
   _target_: emg2qwerty.vector_quantizer.ResidualVectorQuantizer
-  parent_block_id: 1
-  n_vq: 4
-  codebook_size: 8
+  parent_block_id: 1  # Insert :ector_quantizer after the first block
+  n_vq: 4  # Residual VQ with 4 codebooks
+  codebook_size: 1024   # 10 bits frame per codebook; 40 bits per frame over 4 codebooks
   codebook_init: kmeans
   kmeans_max_iters: 300
   kmeans_rtol: 1e-6

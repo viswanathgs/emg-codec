@@ -1,8 +1,8 @@
 # @package _global_
 vector_quantizer:
   _target_: emg2qwerty.vector_quantizer.VectorQuantizer
-  parent_block_id: 1
-  codebook_size: 8
+  parent_block_id: 1  # Insert vector_quantizer after the first block
+  codebook_size: 1024   # 10 bits per frame
   codebook_init: kmeans
   kmeans_max_iters: 300
   kmeans_rtol: 1e-6
