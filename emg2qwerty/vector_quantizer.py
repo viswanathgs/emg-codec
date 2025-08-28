@@ -257,7 +257,7 @@ class VectorQuantizer(BaseVectorQuantizer):
     ) -> torch.Tensor:
         assert samples.ndim == 2
 
-        n_samples = len(samples)
+        n_samples, embedding_dim = samples.shape
         assert n_samples >= n_clusters
 
         # Initialize cluster centroids
@@ -291,18 +291,22 @@ class VectorQuantizer(BaseVectorQuantizer):
             assignment = l2_dist.argmin(dim=-1)
 
             # Update cluster centroids
-            centroids = torch.vstack(
-                [
-                    samples[assignment == cluster_id].mean(dim=0)
-                    for cluster_id in range(n_clusters)
-                ]
+            centroids = torch.zeros(
+                n_clusters,
+                embedding_dim,
+                dtype=samples.dtype,
+                device=samples.device,
             )
+            for cluster_id in range(n_clusters):
+                idx = assignment == cluster_id
+                if idx.any():  # torch.mean() returns NaN if the input tensor is empty
+                    centroids[cluster_id] = samples[idx].mean(dim=0)
 
             # K-means objective: within-cluster sum of squares (sum of
             # squared L2 distances between each point and its assigned cluster).
             error = l2_dist.min(dim=-1).values.pow(2.0).sum()
             if prev_error is not None:
-                if (prev_error - error).abs() / prev_error < rtol:
+                if prev_error == 0 or (prev_error - error).abs() / prev_error < rtol:
                     break
             prev_error = error
 
