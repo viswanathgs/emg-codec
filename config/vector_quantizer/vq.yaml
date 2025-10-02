@@ -1,11 +1,11 @@
 # @package _global_
 vector_quantizer:
   _target_: emg2qwerty.vector_quantizer.VectorQuantizer
-  parent_block_id: 1  # Insert vector_quantizer after the first block
-  codebook_size: 1024   # 10 bits per frame
-  codebook_init: kmeans
+  parent_block_id: 1  # Insert vector_quantizer after the first encoder block
+  codebook_size: 1024   # 10 bits per timestep
+  codebook_init: kmeans  # Init codebook entries via k-means
   kmeans_max_iters: 300
   kmeans_rtol: 1e-6
-  ema_update: True
+  ema_update: True  # Update codebook entries via EMA
   ema_decay: 0.9
   ema_expire_code_threshold: 2.0

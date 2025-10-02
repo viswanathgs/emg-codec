@@ -1,3 +1,7 @@
+# Residual Vector Quantizer (RVQ) implementation following
+# SoundStream: An End-to-End Neural Audio Codec, Zeghidour et al.
+# https://arxiv.org/abs/2107.03312.
+#
 import abc
 
 import logging
@@ -15,6 +19,13 @@ EPS = 1e-8
 
 
 class BaseVectorQuantizer(nn.Module):
+    """Abstract base class for VQ modules to tokenize/compress EMG embeddings.
+
+    Args:
+        parent_block_id: Position of the VQ module in the EMG encoder network.
+        embedding_dim: The embedding dimensionality of the codebook.
+    """
+
     def __init__(
         self,
         parent_block_id: int,
@@ -27,6 +38,8 @@ class BaseVectorQuantizer(nn.Module):
 
     @abc.abstractmethod
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Should take continuous embeddings of shape (T, N, C) and
+        return quantized embeddings of the same shape."""
         raise NotImplementedError
 
     @torch.jit.export
@@ -37,6 +50,31 @@ class BaseVectorQuantizer(nn.Module):
 
 
 class VectorQuantizer(BaseVectorQuantizer):
+    """Vector Quantizer (VQ) module with a single codebook.
+
+    The codebook training strategy largely follows the SoundStream paper:
+    https://arxiv.org/abs/2107.03312.
+
+    Args:
+        parent_block_id: Position of the VQ module in the EMG encoder network.
+        embedding_dim: The embedding dimensionality of the codebook.
+        codebook_size: Number of entries in the codebook.
+        codebook_init: Method to initialize the codebook entries.
+            If "random", the codebook entries will be initialized randomly.
+            If "kmeans" or "kmeans++", the codebook entries will be initialized using
+            k-means clustering on the first training batch.
+        kmeans_max_iters: Max iters for k-means clustering.
+        kmeans_rtol: Relative tolerance for k-means convergence.
+        ema_update: Whether to use exponential moving average (EMA) updates for the
+            codebook entries instead of gradient based updates using a codebook loss.
+            NOTE: No codebook loss is currently implemented. Setting this to False will
+            leave the codebook entries untrained.
+        ema_decay: Decay factor for EMA codebook updates.
+        ema_expire_code_threshold: Threshold for expiring codes based on their
+            EMA cluster size. Codes with an EMA cluster size below this threshold will
+            be replaced with random samples from the current training batch.
+    """
+
     def __init__(
         self,
         parent_block_id: int,
@@ -73,7 +111,7 @@ class VectorQuantizer(BaseVectorQuantizer):
 
         if self.ema_update:
             # Disable gradient updates to the codebook if using EMA updates
-            # (as opposed to codebook or commitment loss).
+            # (as opposed to relying on a codebook loss).
             self.codebook.requires_grad_(False)
 
             # Buffers maintaining EMA cluster sums and counts for codebook updates
@@ -95,6 +133,13 @@ class VectorQuantizer(BaseVectorQuantizer):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Takes continuous embeddings of shape (T, N, C) and returns
+        vector-quantized embeddings of the same shape by looking up the
+        nearest codebook entry for each input embedding.
+
+        Also takes care of updating the codebook via EMA cluster updates
+        during training.
+        """
         # inputs: TNC
         assert inputs.ndim == 3
         assert inputs.shape[2] == self.embedding_dim
@@ -121,11 +166,23 @@ class VectorQuantizer(BaseVectorQuantizer):
 
     @torch.jit.export
     def nbits_compressed(self) -> int:
+        """Number of bits per timestep in the compressed stream."""
         return math.ceil(math.log2(self.codebook_size))
 
     @torch.jit.ignore
     @torch.no_grad()
     def _init_codebook(self, inputs: torch.Tensor) -> None:
+        """Initialize codebook entries.
+
+        If `codebook_init` is "kmeans" or "kmeans++", run k-means clustering on
+        `inputs`, and initialize the codebook entries with the cluster centroids.
+        k-means is run only on rank 0 with the centroids broadcast to other ranks
+        to keep the codebook in sync.
+
+        Args:
+            inputs: Input embeddings of shape (*, embedding_dim) to run k-means on
+                for codebook initialization. Typically the first training batch.
+        """
         if self.codebook_init == "random":
             # Nothing to do, codebook already randomly initialized
             return
@@ -156,6 +213,12 @@ class VectorQuantizer(BaseVectorQuantizer):
     @torch.jit.ignore
     @torch.no_grad()
     def _update_codebook(self, inputs: torch.Tensor, assignment: torch.Tensor) -> None:
+        """Update codebook entries using exponential moving average (EMA).
+
+        Args:
+            inputs: Unquantized input embeddings of shape (*, embedding_dim).
+            assignment: Assigned codebook indices of shape (*) for each input embedding.
+        """
         # inputs: TNC, assignment: TN
         assert inputs.ndim == assignment.ndim + 1
         assert inputs.shape[-1] == self.embedding_dim
@@ -201,6 +264,17 @@ class VectorQuantizer(BaseVectorQuantizer):
     @torch.jit.ignore
     @torch.no_grad()
     def _expire_codes(self, inputs: torch.Tensor) -> None:
+        """Expire and replace codebook entries that are not being used.
+        A code is considered "expired" if its EMA cluster size falls below
+        `ema_expire_code_threshold`. Expired codes are replaced with random
+        samples from the current training batch.
+
+        Runs only on rank 0 with the updated codebook broadcast to other ranks
+        to keep the codebook in sync.
+
+        Args:
+            inputs: Unquantized input embeddings of shape (*, embedding_dim).
+        """
         # Find indices of codes where the EMA cluster size falls below threshold
         expired_idx = torch.where(
             self.ema_cluster_size < self.ema_expire_code_threshold
@@ -235,12 +309,12 @@ class VectorQuantizer(BaseVectorQuantizer):
             replacement_idx = torch.randperm(n_samples)[:n_expired]
             self.codebook.weight[expired_idx] = samples[replacement_idx]
 
-            # If EMA buffers are present, update them for the expired codes
+            # If EMA buffers are present, re-initialize them for the replaced codes
             if self.ema_update:
                 self.ema_cluster_sum[expired_idx] = samples[replacement_idx]
                 self.ema_cluster_size[expired_idx] = 1.0
 
-        # Broadcast the updated codebook to all ranks
+        # Broadcast the updated codebook and the EMA buffers to all ranks
         utils.broadcast_tensor(self.codebook.weight, src_rank=0)
         if self.ema_update:
             utils.broadcast_tensor(self.ema_cluster_sum, src_rank=0)
@@ -255,6 +329,20 @@ class VectorQuantizer(BaseVectorQuantizer):
         max_iters: int = 300,
         rtol: float = 1e-6,
     ) -> torch.Tensor:
+        """Run k-means clustering on `samples` and return the cluster centroids.
+
+        If `codebook_init` is "kmeans", the cluster centroids are initialized
+        by randomly sampling `n_clusters` points from `samples`. If `codebook_init` is
+        "kmeans++", the cluster centroids are initialized using the k-means++ algorithm.
+
+        Args:
+            samples: Input samples of shape (n_samples, embedding_dim) to cluster.
+            n_clusters: Number of clusters.
+            max_iters: Max iters for k-means clustering.
+            rtol: Relative tolerance for convergence and early termination.
+        Returns:
+            Cluster centroids of shape (n_clusters, embedding_dim).
+        """
         assert samples.ndim == 2
 
         n_samples, embedding_dim = samples.shape
@@ -311,7 +399,7 @@ class VectorQuantizer(BaseVectorQuantizer):
             prev_error = error
 
         log.info(
-            f"K-means with {n_samples} samples and {n_clusters} cluster "
+            f"K-means with {n_samples} samples and {n_clusters} clusters "
             f"converged after {n_iter + 1} iters."
         )
 
@@ -319,6 +407,31 @@ class VectorQuantizer(BaseVectorQuantizer):
 
 
 class ResidualVectorQuantizer(BaseVectorQuantizer):
+    """Residual Vector Quantizer (RVQ) module comprising multiple VQ codebooks.
+    The codebook at each level quantizes the residual from the previous levels.
+
+    Args:
+        parent_block_id: Position of the VQ module in the EMG encoder network.
+        embedding_dim: The embedding dimensionality of the codebook.
+        n_vq: Number of codebooks comprising the residual VQ. Also referred to as
+            the number of levels in the residual VQ or its depth.
+        codebook_size: Number of entries in the codebook.
+        codebook_init: Method to initialize the codebook entries.
+            If "random", the codebook entries will be initialized randomly.
+            If "kmeans" or "kmeans++", the codebook entries will be initialized using
+            k-means clustering on the first training batch.
+        kmeans_max_iters: Max iters for k-means clustering.
+        kmeans_rtol: Relative tolerance for k-means convergence.
+        ema_update: Whether to use exponential moving average (EMA) updates for the
+            codebook entries instead of gradient based updates using a codebook loss.
+            NOTE: No codebook loss is currently implemented. Setting this to False will
+            leave the codebook entries untrained.
+        ema_decay: Decay factor for EMA codebook updates.
+        ema_expire_code_threshold: Threshold for expiring codes based on their
+            EMA cluster size. Codes with an EMA cluster size below this threshold will
+            be replaced with random samples from the current training batch.
+    """
+
     def __init__(
         self,
         parent_block_id: int,
@@ -337,6 +450,7 @@ class ResidualVectorQuantizer(BaseVectorQuantizer):
             embedding_dim=embedding_dim,
         )
 
+        # Sequence of n_vq VectorQuantizer modules
         self.vq = nn.ModuleList(
             VectorQuantizer(
                 parent_block_id=parent_block_id,
@@ -366,4 +480,5 @@ class ResidualVectorQuantizer(BaseVectorQuantizer):
 
     @torch.jit.export
     def nbits_compressed(self) -> int:
+        """Number of bits per timestep in the compressed stream."""
         return sum([vq.nbits_compressed() for vq in self.vq])

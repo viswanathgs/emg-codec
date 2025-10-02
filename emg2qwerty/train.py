@@ -110,11 +110,11 @@ def main(config: DictConfig):
     # Validate and test on the best checkpoint (if training), or on the
     # loaded `config.checkpoint` (otherwise)
     val_metrics = trainer.validate(module, datamodule)
-    test_metrics = trainer.test(module, datamodule)
+    # test_metrics = trainer.test(module, datamodule)
 
     results = {
         "val_metrics": val_metrics,
-        "test_metrics": test_metrics,
+        # "test_metrics": test_metrics,
         "best_checkpoint": trainer.checkpoint_callback.best_model_path,
     }
     pprint.pprint(results, sort_dicts=False)
