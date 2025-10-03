@@ -7,7 +7,11 @@
 from collections.abc import Sequence
 
 import torch
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 from torch import nn
+
+from emg2qwerty.vector_quantizer import BaseVectorQuantizer
 
 
 class SpectrogramNorm(nn.Module):
@@ -252,6 +256,7 @@ class TDSConvEncoder(nn.Module):
         block_channels (list): A list of integers indicating the number
             of channels per `TDSConv2dBlock`.
         kernel_width (int): The kernel size of the temporal convolutions.
+        vector_quantizer (DictConfig): Optional vector quantizer to insert.
     """
 
     def __init__(
@@ -259,22 +264,41 @@ class TDSConvEncoder(nn.Module):
         num_features: int,
         block_channels: Sequence[int] = (24, 24, 24, 24),
         kernel_width: int = 32,
+        vector_quantizer: DictConfig | None = None,
     ) -> None:
         super().__init__()
 
         assert len(block_channels) > 0
-        tds_conv_blocks: list[nn.Module] = []
-        for channels in block_channels:
+
+        # Instantiate vector quantization module if configured
+        if vector_quantizer is not None:
+            vq_module = instantiate(vector_quantizer, embedding_dim=num_features)
+            assert isinstance(vq_module, BaseVectorQuantizer)
+        else:
+            vq_module = None
+
+        layers: list[nn.Module] = []
+        for block_id, channels in enumerate(block_channels):
             assert (
                 num_features % channels == 0
             ), "block_channels must evenly divide num_features"
-            tds_conv_blocks.extend(
+
+            # Insert vector quantization module at the appropriate block
+            if vq_module is not None and vq_module.parent_block_id == block_id:
+                layers.append(vq_module)
+
+            layers.extend(
                 [
                     TDSConv2dBlock(channels, num_features // channels, kernel_width),
                     TDSFullyConnectedBlock(num_features),
                 ]
             )
-        self.tds_conv_blocks = nn.Sequential(*tds_conv_blocks)
+
+        # Insert vector quantization module at the appropriate block
+        if vq_module is not None and vq_module.parent_block_id >= len(block_channels):
+            layers.append(vq_module)
+
+        self.encoder = nn.Sequential(*layers)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+        return self.encoder(inputs)  # (T, N, num_features)

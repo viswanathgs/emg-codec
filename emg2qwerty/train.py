@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
 import pprint
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,7 +12,7 @@ from typing import Any
 
 import hydra
 import pytorch_lightning as pl
-from hydra.utils import get_original_cwd, instantiate
+from hydra.utils import instantiate
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from emg2qwerty import transforms, utils
@@ -27,12 +26,8 @@ log = logging.getLogger(__name__)
 def main(config: DictConfig):
     log.info(f"\nConfig:\n{OmegaConf.to_yaml(config)}")
 
-    # Add working dir to PYTHONPATH
-    working_dir = get_original_cwd()
-    python_paths = os.environ.get("PYTHONPATH", "").split(os.pathsep)
-    if working_dir not in python_paths:
-        python_paths.append(working_dir)
-        os.environ["PYTHONPATH"] = os.pathsep.join(python_paths)
+    utils.set_python_path()
+    utils.set_cuda_visible_devices_for_sweep(config)
 
     # Seed for determinism. This seeds torch, numpy and python random modules
     # taking global rank into account (for multi-process distributed setting).
@@ -60,6 +55,7 @@ def main(config: DictConfig):
         optimizer=config.optimizer,
         lr_scheduler=config.lr_scheduler,
         decoder=config.decoder,
+        vector_quantizer=config.vector_quantizer,
         _recursive_=False,
     )
     if config.checkpoint is not None:
@@ -114,11 +110,11 @@ def main(config: DictConfig):
     # Validate and test on the best checkpoint (if training), or on the
     # loaded `config.checkpoint` (otherwise)
     val_metrics = trainer.validate(module, datamodule)
-    test_metrics = trainer.test(module, datamodule)
+    # test_metrics = trainer.test(module, datamodule)
 
     results = {
         "val_metrics": val_metrics,
-        "test_metrics": test_metrics,
+        # "test_metrics": test_metrics,
         "best_checkpoint": trainer.checkpoint_callback.best_model_path,
     }
     pprint.pprint(results, sort_dicts=False)
