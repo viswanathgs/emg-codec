@@ -28,3 +28,5 @@ python -m emg2qwerty.train \
   vector_quantizer.codebook_size=1024 \
   --multirun
 ```
+
+Full list of RVQ hyperparams at [residual_vq.yaml](config/vector_quantizer/residual_vq.yaml).
